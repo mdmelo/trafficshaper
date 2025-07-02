@@ -1,0 +1,26 @@
+{
+  "lo": {
+    "rate_limit": "10mbit",
+    "packet_loss": "0.5",
+    "packet_duplication": "0.1",
+    "protocol": "All"
+  },
+  "docker0": {
+    "rate_limit": "10mbit",
+    "packet_loss": "0.5",
+    "packet_duplication": "0.1",
+    "protocol": "All"
+  },
+  "wlp3s0": {
+    "rate_limit": "5mbit",
+    "packet_loss": "1",
+    "packet_duplication": "0",
+    "protocol": "TCP"
+  },
+  "enp0s25": {
+    "rate_limit": "",
+    "packet_loss": "",
+    "packet_duplication": "",
+    "protocol": "UDP"
+  }
+}

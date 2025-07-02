@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Configure Network Interfaces</title>
+</head>
+<body>
+    <h1>Configure Network Interfaces</h1>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul>
+        {% for category, message in messages %}
+          <li class="{{ category }}">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    <form method="post"> <!-- ADDED/CHANGED -->
+        {% for iface in interfaces %} <!-- ADDED/CHANGED -->
+            <fieldset>
+                <legend>{{ iface }}</legend>
+                <label>IP Address:
+                    <input type="text" name="{{ iface }}_ip" value="{{ configs[iface]['ip'] }}"> <!-- ADDED/CHANGED -->
+                </label><br>
+                <label>Netmask:
+                    <input type="text" name="{{ iface }}_netmask" value="{{ configs[iface]['netmask'] }}"> <!-- ADDED/CHANGED -->
+                </label><br>
+                <label>Gateway:
+                    <input type="text" name="{{ iface }}_gateway" value="{{ configs[iface]['gateway'] }}"> <!-- ADDED/CHANGED -->
+                </label>
+            </fieldset>
+            <br>
+        {% endfor %}
+        <button type="submit">Save Configurations</button> <!-- ADDED/CHANGED -->
+    </form>
+</body>
+</html>
