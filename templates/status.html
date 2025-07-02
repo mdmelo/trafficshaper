@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TC Status - {{ iface }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Traffic Control Status for {{ iface }}</h1>
+
+    <a href="{{ url_for('index') }}">← Back to Shaping Config</a>
+
+    <pre>{{ output }}</pre>
+</body>
+</html>
