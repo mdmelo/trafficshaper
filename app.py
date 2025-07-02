@@ -26,6 +26,7 @@ def parse_tc_config(iface):
         rate_match = re.search(r"rate (\S+)", class_output)
         if rate_match:
             config["rate"] = rate_match.group(1)
+            print("parse_tc_config: found rate {}".format(config["rate"]))
 
         # Parse loss and duplicate from qdisc netem output
         # Example line:
@@ -33,10 +34,12 @@ def parse_tc_config(iface):
         loss_match = re.search(r"loss (\d+(\.\d+)?)%", qdisc_output)
         if loss_match:
             config["loss"] = loss_match.group(1)
+            print("parse_tc_config: found loss {}".format(config["loss"]))
 
         dupe_match = re.search(r"duplicate (\d+(\.\d+)?)%", qdisc_output)
         if dupe_match:
             config["duplicate"] = dupe_match.group(1)
+            print("parse_tc_config: found duplicate {}".format(config["duplicate"]))
 
         # Parse protocol from filter output
         # Example line:
@@ -48,10 +51,13 @@ def parse_tc_config(iface):
                 config["protocol"] = "udp"
             else:
                 config["protocol"] = ""
+            print("parse_tc_config: set protocol to {}".format(config["protocol"]))
 
         # Add interface key for template
         config["interface"] = iface
+        print("parse_tc_config: all for this interface {}".format(config["interface"]))
 
+        print("parse_tc_config: returning dict: {}".format(config))
         return config
 
     except Exception as e:
@@ -111,6 +117,7 @@ def status():
 @app.route("/", methods=["GET", "POST"])
 def index():
     interfaces = get_interfaces()
+    print("index: current interfaces: {}".format(interfaces))
     output = ""
     config = {
         "rate": "",
@@ -122,49 +129,67 @@ def index():
 
     # If POST, apply shaping
     if request.method == "POST":
-        iface = request.form.get("interface")
-        rate = request.form.get("rate")
-        loss = request.form.get("loss", "")
-        duplicate = request.form.get("duplicate", "")
-        protocol = request.form.get("protocol", "")
+        if "apply" in request.form:
+            iface = request.form.get("interface")
+            rate = request.form.get("rate")
+            loss = request.form.get("loss", "")
+            duplicate = request.form.get("duplicate", "")
+            protocol = request.form.get("protocol", "")
 
-        # Clear existing qdisc
-        run_cmd(f"tc qdisc del dev {iface} root || true")
+            print("index [POST]:  interface {} rate {} loss {} duplicate {} protocol {}"
+                  .format(iface, rate, loss, duplicate, protocol))
 
-        # Apply HTB rate limiting
-        output += run_cmd(f"tc qdisc add dev {iface} root handle 1: htb default 11")
-        output += run_cmd(f"tc class add dev {iface} parent 1: classid 1:1 htb rate {rate}")
-        output += run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:11 htb rate {rate}")
+            # Clear existing qdisc
+            run_cmd(f"tc qdisc del dev {iface} root || true")
 
-        # Apply netem for loss and duplicate
-        netem_cmd = f"tc qdisc add dev {iface} parent 1:11 handle 10: netem"
-        if loss:
-            netem_cmd += f" loss {loss}%"
-        if duplicate:
-            netem_cmd += f" duplicate {duplicate}%"
-        output += run_cmd(netem_cmd)
+            # Apply HTB rate limiting
+            output += run_cmd(f"tc qdisc add dev {iface} root handle 1: htb default 11")
+            output += run_cmd(f"tc class add dev {iface} parent 1: classid 1:1 htb rate {rate}")
+            output += run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:11 htb rate {rate}")
 
-        # Protocol filtering with tc-filter
-        if protocol.lower() in ['tcp', 'udp']:
-            protocol_number = "6" if protocol.lower() == "tcp" else "17"
-            output += run_cmd(f"tc filter add dev {iface} protocol ip parent 1: prio 1 u32 match ip protocol {protocol_number} 0xff flowid 1:11")
+            # Apply netem for loss and duplicate
+            netem_cmd = f"tc qdisc add dev {iface} parent 1:11 handle 10: netem"
+            if loss:
+                netem_cmd += f" loss {loss}%"
+            if duplicate:
+                netem_cmd += f" duplicate {duplicate}%"
+            output += run_cmd(netem_cmd)
 
-        config = {
-            "rate": rate,
-            "loss": loss,
-            "duplicate": duplicate,
-            "protocol": protocol,
-            "interface": iface
-        }
+            # Protocol filtering with tc-filter
+            if protocol.lower() in ['tcp', 'udp']:
+                protocol_number = "6" if protocol.lower() == "tcp" else "17"
+                output += run_cmd(f"tc filter add dev {iface} protocol ip parent 1: prio 1 u32 match ip protocol {protocol_number} 0xff flowid 1:11")
+
+            config = {
+                "rate": rate,
+                "loss": loss,
+                "duplicate": duplicate,
+                "protocol": protocol,
+                "interface": iface
+            }
+        elif "interface" in request.form:
+            print("index [PUT]:  no apply")
+
+            # Just selected an interface: prefill values from tc
+            iface = request.form["interface"]
+            config = parse_tc_config(iface)
+            config["interface"] = iface
     else:
         # On GET, get interface from query param or default to first
         iface = request.args.get("iface")
+        print("index [GET]: requested interface {}".format(iface))
+
         if iface is None or iface not in interfaces:
             iface = interfaces[0] if interfaces else None
 
+        print("index [GET]: using interface {}".format(iface))
+
         if iface:
+            print("index [GET]: parsing tc to populate interface {} settings".format(iface))
             config = parse_tc_config(iface)
             config["interface"] = iface
+        else:
+            config = {"rate": "", "loss": "", "duplicate": "", "protocol": "", "interface": ""}
 
     return render_template("index.html", interfaces=interfaces, output=output, config=config)
 

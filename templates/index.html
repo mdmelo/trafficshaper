@@ -7,44 +7,47 @@
 <body>
     <h1>Network Traffic Shaper</h1>
     <!-- Shaping Form -->
-<form method="post" action="/">
-    <div class="form-grid">
-        <div class="form-group">
-            <label for="interface">Select Interface:</label>
-            <select name="interface" required>
-                {% for iface in interfaces %}
-                    <option value="{{ iface }}">{{ iface }}</option>
-                {% endfor %}
-            </select>
+    <form method="post" action="/">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="interface">Select Interface:</label>
+                <script>console.log("html: select interface");</script>
+                <select name="interface" onchange="window.location.href='/?iface=' + this.value">
+                    <option value="">-- Select Interface --</option>
+                    {% for iface in interfaces %}
+                        <option value="{{ iface }}" {% if config.interface == iface %}selected{% endif %}>{{ iface }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="rate">Rate Limit (e.g., 1mbit):</label>
+                 <input type="text" name="rate" value="{{ config.rate }}" required>
+            </div>
+
+            <div class="form-group">
+                <label for="loss">Packet Loss (%):</label>
+                <input type="number" name="loss" min="0" max="100" step="0.1" value="{{ config.loss }}">
+            </div>
+
+            <div class="form-group">
+                <label for="duplicate">Packet Duplication (%):</label>
+                <input type="number" name="duplicate" min="0" max="100" step="0.1" value="{{ config.duplicate }}">
+            </div>
+
+            <div class="form-group">
+                <label for="protocol">Protocol:</label>
+                <select name="protocol">
+                    <option value="" {% if config.protocol == "" %}selected{% endif %}>All</option>
+                    <option value="tcp" {% if config.protocol == "tcp" %}selected{% endif %}>TCP</option>
+                    <option value="udp" {% if config.protocol == "udp" %}selected{% endif %}>UDP</option>
+                </select>
+            </div>
         </div>
 
-        <div class="form-group">
-            <label for="rate">Rate Limit (e.g., 1mbit):</label>
-            <input type="text" name="rate" required>
-        </div>
-
-        <div class="form-group">
-            <label for="loss">Packet Loss (%):</label>
-            <input type="number" name="loss" min="0" max="100" step="0.1">
-        </div>
-
-        <div class="form-group">
-            <label for="duplicate">Packet Duplication (%):</label>
-            <input type="number" name="duplicate" min="0" max="100" step="0.1">
-        </div>
-
-        <div class="form-group">
-            <label for="protocol">Protocol:</label>
-            <select name="protocol">
-                <option value="">All</option>
-                <option value="tcp">TCP</option>
-                <option value="udp">UDP</option>
-            </select>
-        </div>
-    </div>
-
-    <input type="submit" value="Apply Traffic Shaping">
-</form>
+        <input type="hidden" name="apply" value="true">
+        <input type="submit" value="Apply Traffic Shaping">
+    </form>
 
     <!-- Status Form -->
     <form method="post" action="/status">
