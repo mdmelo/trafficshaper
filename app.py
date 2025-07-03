@@ -7,6 +7,102 @@ import time
 app = Flask(__name__)
 
 
+# 1. qdisc (Queueing Discipline)
+# Manages how packets are queued and scheduled for transmission on an interface.
+#     Root qdisc sits directly on a network device.
+#     Can be classless (e.g., pfifo, fq_codel) or classful (e.g., htb, tbf).
+#     Implements policies like shaping (rate limiting), prioritization, and delay.
+#
+# 2. class
+# Defines subdivisions under a classful qdisc to allow hierarchical control.
+#     Classes inherit and refine the parent qdisc’s behavior.
+#     Used to divide traffic (e.g., by type or source) and apply different rates or priorities.
+#     Example: htb can have multiple classes for different bandwidth limits.
+#
+# 3. filter
+# Directs packets to a specific class within a qdisc hierarchy based on packet attributes.
+#     Match rules based on IP, ports, protocol, fwmark, etc.
+#     Essential for traffic classification and routing to proper queues/classes.
+
+# example
+#     qdisc htb 1: root refcnt 2 r2q 10 default 0x30 direct_packets_stat 0 direct_qlen 1000
+#     qdisc netem 10: parent 1:11 limit 1000 loss 5% duplicate 15%
+#     qdisc ingress ffff: parent ffff:fff1 ----------------
+#     class htb 1:11 parent 1:1 leaf 10: prio 0 rate 1Gbit ceil 1Gbit burst 1375b cburst 1375b
+#     class htb 1:1 root rate 1Gbit ceil 1Gbit burst 1375b cburst 1375b
+#     class htb 1:10 parent 1:1 prio 0 rate 1Gbit ceil 1Gbit burst 1375b cburst 1375b
+#     class htb 1:30 parent 1:1 prio 0 rate 1Gbit ceil 1Gbit burst 1375b cburst 1375b
+#     filter parent 1: protocol ip pref 1 u32 chain 0
+#     filter parent 1: protocol ip pref 1 u32 chain 0 fh 800: ht divisor 1
+#     filter parent 1: protocol ip pref 1 u32 chain 0 fh 800::800 order 2048 key ht 800 bkt 0 *flowid 1:10 not_in_hw
+#       match 00000000/00000000 at 0
+
+# qdisc setup
+#     htb 1: root — Hierarchical Token Bucket qdisc as the root, shaping at 1 Gbit.
+#     netem 10: on class 1:11 — Simulates 5% packet loss + 15% duplication.
+#     ingress ffff: — Placeholder for ingress filtering; currently unused.
+#
+# classes
+#     1:1 — Root class, 1 Gbit rate/ceiling.
+#     1:10 — Class for matched traffic, 1 Gbit.
+#     1:11 — Same as above, but also has netem (loss/dup).
+#     1:30 — Default class (from default 0x30 = 48 decimal = 0x30).
+#
+# filter
+#     Matches all IPv4 traffic (match 00000000/00000000 at 0)
+#     Sends it to class 1:10 (flowid 1:10)
+#
+# Summary
+# All IPv4 packets are classified into 1:10, which shares a 1 Gbit pipe with two other unused classes.
+#  1:11 is configured with netem, but unused by current filters. Default fallback is 1:30
+
+#    HTB (Hierarchical Token Bucket)  Bandwidth shaping and sharing.
+#        Enforces rate limits (minimum and maximum bandwidth).
+#        Supports class hierarchy (parent/child classes).
+#        Good for dividing bandwidth across multiple traffic types.
+#
+#        rate: guaranteed bandwidth.
+#        ceil: maximum bandwidth.
+#        burst: temporary bandwidth allowance for short spikes.
+#
+#    netem (Network Emulator) Simulates poor network conditions.
+#        Adds artificial delay, packet loss, duplication, corruption, etc.
+#        Useful for testing how applications behave under bad network conditions.
+
+#    Class Identifiers
+#    Format: major:minor
+#        major: ID of the parent qdisc (e.g., 1: from htb 1:).
+#        minor: ID of the specific class under that qdisc.
+#
+#    So in class htb 1:10:
+#        1: means it's part of qdisc htb 1:
+#        10 is the class ID (you choose this)
+#
+#    Rules:
+#        You choose the minor number (:1, :10, :11, :30...), but they must be unique under the same major.
+#        Use hex or decimal (e.g., 0x30 == 48)
+#
+#        Conventionally:
+#            1:1 is often the root class.
+#            Others (1:10, 1:11, etc.) are leaf or child classes.
+
+# IFB (Intermediate Functional Block) - virtual device to allow application of egress-style shaping to ingress traffic.
+#
+# The IFB device is used to redirect ingress traffic so that it can be shaped like egress traffic.
+# Linux tc can shape egress natively, but can't shape ingress directly (only drop it).
+# So you redirect ingress to an IFB device, then shape it there using normal egress tools (htb, netem, etc.).
+#
+# How it works:
+#    Create and bring up an IFB interface (e.g., ifb0).
+#    Use tc qdisc add dev eth0 ingress + tc filter ... action mirred egress redirect dev ifb0 to redirect incoming packets.
+#    Apply egress shaping qdiscs (e.g., htb, netem) on ifb0.
+#
+# mirred = "Mirror/Redirect" action - is a tc action module that can mirror packets (copy and send to
+# another interface) or redirect packets (move to another interface), commonly used to enable ingress shaping via IFB.
+
+
+
+
 def parse_tc_config(iface):
     try:
         # Get qdisc info
@@ -139,6 +235,8 @@ def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all"):
 
     run_cmd(f"tc qdisc add dev {iface} handle ffff: ingress || true")
 
+    # mirred egress redirect ifb0: send the packet out of ifb0, where it can be shaped.
+    # used with tc filter to match and redirect ingress traffic.
     if protocol == "udp":
         run_cmd(f"tc filter add dev {iface} parent ffff: protocol ip prio 1 u32 match ip protocol 17 0xff action mirred egress redirect dev ifb0")
     elif protocol == "tcp":
