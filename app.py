@@ -95,14 +95,9 @@ def get_interfaces():
 
 
 def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all"):
-    # Cleanup existing shaping (same as before)
-    run_cmd(f"tc qdisc del dev {iface} root 2>/dev/null || true")
-    run_cmd(f"tc qdisc del dev {iface} ingress 2>/dev/null || true")
-    run_cmd(f"tc filter del dev {iface} parent ffff: 2>/dev/null || true")
-    if os.system("ip link show ifb0 > /dev/null 2>&1") == 0:
-        run_cmd("tc qdisc del dev ifb0 root 2>/dev/null || true")
-        run_cmd("ip link set dev ifb0 down 2>/dev/null || true")
-        run_cmd("ip link delete ifb0 type ifb 2>/dev/null || true")
+    # Cleanup existing shaping (replaced redundant deletes with delete_limit)
+    delete_limit(iface)
+    time.sleep(0.1)
 
     # Add root qdisc
     run_cmd(f"tc qdisc add dev {iface} root handle 1: htb default 30")
@@ -112,77 +107,69 @@ def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all"):
     run_cmd(f"tc class add dev {iface} parent 1: classid 1:1 htb rate {rate}")
     time.sleep(0.1)
 
-    # Add child class 1:30
-    run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:30 htb rate {rate}")
-    time.sleep(0.1)
-
-    # Add the missing class 1:11 for netem qdisc
+    # Add child classes needed for netem and filters
+    run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:10 htb rate {rate}")
+    time.sleep(0.05)
+    run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:30 htb rate 1000mbit")
+    time.sleep(0.05)
     run_cmd(f"tc class add dev {iface} parent 1:1 classid 1:11 htb rate {rate}")
-    time.sleep(0.1)
+    time.sleep(0.05)
 
-    # Attach netem to class 1:11
-    run_cmd(
-        f"tc qdisc add dev {iface} parent 1:11 handle 10: netem loss {loss}% duplicate {duplicate}%"
-    )
+    # Attach netem qdisc for loss and duplicate to 1:11
+    run_cmd(f"tc qdisc add dev {iface} parent 1:11 handle 10: netem loss {loss}% duplicate {duplicate}%")
 
-    # potential limit traffic shaping to specific transport
-    if protocol == 'udp':
-        limited_classid = "1:10"
-        default_classid = "1:30"
+    # Add filters based on protocol
+    if protocol == "udp":
         proto_num = 17
-    elif protocol == 'tcp':
-        limited_classid = "1:10"
-        default_classid = "1:30"
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match u32 0 0 flowid 1:30")
+    elif protocol == "tcp":
         proto_num = 6
-    else:  # 'all'
-        # No filtering by protocol: just one class for all traffic
-        run_cmd(f"tc class add dev {iface} parent 1: classid 1:10 htb rate {rate}")
-        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol 0 0 flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match u32 0 0 flowid 1:30")
+    else:
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match u32 0 0 flowid 1:10")
 
-    if protocol in ('udp', 'tcp'):
-        run_cmd(f"tc class add dev {iface} parent 1:1 classid {limited_classid} htb rate {rate}")
-        run_cmd(f"tc class add dev {iface} parent 1:1 classid {default_classid} htb rate 1000mbit")
-        run_cmd(
-            f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid {limited_classid}"
-        )
-        run_cmd(
-            f"tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip protocol 0 0 flowid {default_classid}"
-        )
-
-    # Setup ingress shaping via ifb0 (same as before)
+    # Setup ingress shaping using ifb0 for both directions
     run_cmd("modprobe ifb numifbs=1")
-    run_cmd("ip link add ifb0 type ifb || true")
+    if os.system("ip link show ifb0 > /dev/null 2>&1") != 0:
+        run_cmd("ip link add ifb0 type ifb")
     run_cmd("ip link set dev ifb0 up")
+    time.sleep(0.1)
 
     run_cmd(f"tc qdisc add dev {iface} handle ffff: ingress || true")
-    run_cmd(f"tc filter add dev {iface} parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0")
 
-    run_cmd("tc qdisc add dev ifb0 root handle 2: htb default 30 || true")
+    if protocol == "udp":
+        run_cmd(f"tc filter add dev {iface} parent ffff: protocol ip prio 1 u32 match ip protocol 17 0xff action mirred egress redirect dev ifb0")
+    elif protocol == "tcp":
+        run_cmd(f"tc filter add dev {iface} parent ffff: protocol ip prio 1 u32 match ip protocol 6 0xff action mirred egress redirect dev ifb0")
+    else:
+        run_cmd(f"tc filter add dev {iface} parent ffff: protocol ip prio 1 u32 match u32 0 0 action mirred egress redirect dev ifb0")
+
+    run_cmd(f"tc qdisc add dev ifb0 root handle 2: htb default 30 || true")
     run_cmd(f"tc class add dev ifb0 parent 2: classid 2:1 htb rate {rate}")
-    run_cmd(f"tc class add dev ifb0 parent 2:1 classid 2:30 htb rate {rate}")
+    run_cmd(f"tc class add dev ifb0 parent 2:1 classid 2:10 htb rate {rate}")
+    run_cmd(f"tc class add dev ifb0 parent 2:1 classid 2:30 htb rate 1000mbit")
 
+    if protocol in ("udp", "tcp"):
+        run_cmd(f"tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 2:10")
+        run_cmd(f"tc filter add dev ifb0 protocol ip parent 2:0 prio 2 u32 match u32 0 0 flowid 2:30")
+    else:
+        run_cmd(f"tc filter add dev ifb0 protocol ip parent 2:0 prio 1 u32 match u32 0 0 flowid 2:10")
 
-
-def device_exists(dev):
-    return os.system(f"ip link show {dev} > /dev/null 2>&1") == 0
 
 def delete_limit(iface):
-    # Always try to delete root qdisc
-    output = run_cmd(f"tc qdisc del dev {iface} root 2>/dev/null || true")
-
-    # Only try to remove ingress filter/qdisc if 'ingress' is present
-    ingress_qdisc_exists = os.system(f"tc qdisc show dev {iface} | grep ingress > /dev/null") == 0
-    if ingress_qdisc_exists:
-        output += run_cmd(f"tc filter del dev {iface} parent ffff: 2>/dev/null || true")
-        output += run_cmd(f"tc qdisc del dev {iface} ingress 2>/dev/null || true")
-
-    # Only clean up ifb0 if it exists
+    # Delete root qdisc
+    run_cmd(f"tc qdisc del dev {iface} root 2>/dev/null || true")
+    # Delete ingress qdisc and filters if exist
+    if os.system(f"tc qdisc show dev {iface} | grep ingress > /dev/null") == 0:
+        run_cmd(f"tc filter del dev {iface} parent ffff: 2>/dev/null || true")
+        run_cmd(f"tc qdisc del dev {iface} ingress 2>/dev/null || true")
+    # Delete ifb0 qdisc and device if exists
     if os.system("ip link show ifb0 > /dev/null 2>&1") == 0:
-        output += run_cmd("tc qdisc del dev ifb0 root 2>/dev/null || true")
-        output += run_cmd("ip link set dev ifb0 down 2>/dev/null || true")
-        output += run_cmd("ip link delete ifb0 type ifb 2>/dev/null || true")
-
-    return output
+        run_cmd("tc qdisc del dev ifb0 root 2>/dev/null || true")
+        run_cmd("ip link set dev ifb0 down 2>/dev/null || true")
+        run_cmd("ip link delete ifb0 type ifb 2>/dev/null || true")
 
 
 @app.route("/clear", methods=["POST"])
@@ -210,7 +197,7 @@ def reset():
 @app.route("/status", methods=["POST"])
 def status():
     iface = request.form["interface"]
-    output =  stat_cmd(f"tc qdisc show dev {iface}")
+    output = stat_cmd(f"tc qdisc show dev {iface}")
     output += stat_cmd(f"tc class show dev {iface}")
     output += stat_cmd(f"tc filter show dev {iface}")
     if "noqueue" in output or "pfifo_fast" in output:
@@ -244,10 +231,11 @@ def index():
                   .format(iface, rate, loss, duplicate, protocol))
 
             # Clear existing qdisc
-            run_cmd(f"tc qdisc del dev {iface} root || true")
+            # run_cmd(f"tc qdisc del dev {iface} root || true")
+            delete_limit(iface)
 
             # Apply HTB rate limiting
-            apply_limit(iface, rate, loss, duplicate, protocol)
+            apply_limit(iface, rate, float(loss), float(duplicate), protocol)
 
             # # Apply netem for loss and duplicate
             # netem_cmd = f"tc qdisc add dev {iface} parent 1:11 handle 10: netem"
@@ -294,4 +282,3 @@ def index():
             config = {"rate": "", "loss": "", "duplicate": "", "protocol": "", "interface": ""}
 
     return render_template("index.html", interfaces=interfaces, output=output, config=config)
-
