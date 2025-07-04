@@ -267,14 +267,14 @@ def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all", delay=0):
     # Add filters based on protocol
     if protocol == "udp":
         proto_num = 17
-        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:11")
         run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match u32 0 0 flowid 1:30")
     elif protocol == "tcp":
         proto_num = 6
-        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip protocol {proto_num} 0xff flowid 1:11")
         run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match u32 0 0 flowid 1:30")
     else:
-        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match u32 0 0 flowid 1:10")
+        run_cmd(f"tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match u32 0 0 flowid 1:11")
 
     # Setup ingress shaping using ifb0 for both directions
     run_cmd("modprobe ifb numifbs=1")
