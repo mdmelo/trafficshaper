@@ -102,6 +102,40 @@ app = Flask(__name__)
 
 
 
+#                       +-----------------+
+#                       |  Physical NIC   | eth0
+#                       +--------+--------+
+#                                |   ingress
+#                                ▼
+#                     [tc ingress qdisc on eth0]
+#                   ┌──────────────────────────────┐
+#                   │ tc filter → mirred redirect  │
+#                   │   action                     │
+#                   └────────────┬─────────────────┘
+#                                ▼
+#                   +------------------------------+
+#                   |        IFB vNIC (ifb0)       |
+#                   +-----------+------------------+
+#                                |
+#                                ▼
+#                    [tc egress qdisc on ifb0]
+#                      (htb, netem, filters…)
+#                                |
+#                                ▼
+#                      Shaped ingress traffic
+#
+#                               /\
+#                               ||
+#                               || egress
+#                               ||
+#                               \/
+#                       +-----------------+
+#                       |   Physical NIC  | eth0
+#                       +-----------------+
+#                                |
+#                      [tc egress qdisc on eth0]
+#                            (htb, netem…)
+
 
 def parse_tc_config(iface):
     try:
@@ -115,7 +149,8 @@ def parse_tc_config(iface):
             "rate": "",
             "loss": "",
             "duplicate": "",
-            "protocol": ""
+            "protocol": "",
+            "delay": "",
         }
 
         # Parse rate from class output, look for htb class with rate
@@ -138,6 +173,12 @@ def parse_tc_config(iface):
         if dupe_match:
             config["duplicate"] = dupe_match.group(1)
             print("parse_tc_config: found duplicate {}".format(config["duplicate"]))
+
+        delay_match = re.search(r"delay (\d+)(?:ms)?", qdisc_output)
+        if delay_match:
+            config["delay"] = delay_match.group(1)
+        else:
+            config["delay"] = ""
 
         # Parse protocol from filter output
         # Example line:
@@ -166,6 +207,7 @@ def parse_tc_config(iface):
             "loss": "",
             "duplicate": "",
             "protocol": "",
+            "delay": "",
             "interface": iface
         }
 
@@ -190,7 +232,7 @@ def get_interfaces():
     return result.stdout.strip().split('\n')
 
 
-def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all"):
+def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all", delay=0):
     # Cleanup existing shaping (replaced redundant deletes with delete_limit)
     delete_limit(iface)
     time.sleep(0.1)
@@ -212,7 +254,15 @@ def apply_limit(iface, rate, loss=0, duplicate=0, protocol="all"):
     time.sleep(0.05)
 
     # Attach netem qdisc for loss and duplicate to 1:11
-    run_cmd(f"tc qdisc add dev {iface} parent 1:11 handle 10: netem loss {loss}% duplicate {duplicate}%")
+    # Build netem command with delay, loss, duplicate
+    netem_cmd = f"tc qdisc add dev {iface} parent 1:11 handle 10: netem"
+    if delay and float(delay) > 0:
+        netem_cmd += f" delay {delay}ms"
+    if loss and float(loss) > 0:
+        netem_cmd += f" loss {loss}%"
+    if duplicate and float(duplicate) > 0:
+        netem_cmd += f" duplicate {duplicate}%"
+    run_cmd(netem_cmd)
 
     # Add filters based on protocol
     if protocol == "udp":
@@ -308,6 +358,7 @@ def index():
     interfaces = get_interfaces()
     print("index: current interfaces: {}".format(interfaces))
     output = ""
+    error_msg = ""
     config = {
         "rate": "",
         "loss": "",
@@ -324,16 +375,21 @@ def index():
             loss = request.form.get("loss", "")
             duplicate = request.form.get("duplicate", "")
             protocol = request.form.get("protocol", "all")
+            delay = request.form.get("delay", "0")
 
             print("index [POST]:  interface {} rate {} loss {} duplicate {} protocol {}"
                   .format(iface, rate, loss, duplicate, protocol))
 
-            # Clear existing qdisc
-            # run_cmd(f"tc qdisc del dev {iface} root || true")
-            delete_limit(iface)
+            try:
+                # Clear existing qdisc
+                # run_cmd(f"tc qdisc del dev {iface} root || true")
+                delete_limit(iface)
 
-            # Apply HTB rate limiting
-            apply_limit(iface, rate, float(loss), float(duplicate), protocol)
+                # Apply HTB rate limiting
+                apply_limit(iface, rate, float(loss), float(duplicate), protocol, float(delay))
+
+            except Exception as e:
+                error_msg = f"Error applying settings to interface '{iface}': {str(e)}"
 
             # # Apply netem for loss and duplicate
             # netem_cmd = f"tc qdisc add dev {iface} parent 1:11 handle 10: netem"
@@ -353,6 +409,7 @@ def index():
                 "loss": loss,
                 "duplicate": duplicate,
                 "protocol": protocol,
+                "delay": delay,
                 "interface": iface
             }
         elif "interface" in request.form:
@@ -379,4 +436,4 @@ def index():
         else:
             config = {"rate": "", "loss": "", "duplicate": "", "protocol": "", "interface": ""}
 
-    return render_template("index.html", interfaces=interfaces, output=output, config=config)
+    return render_template("index.html", interfaces=interfaces, output=output, config=config, error_msg=error_msg)
