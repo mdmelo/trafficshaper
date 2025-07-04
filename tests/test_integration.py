@@ -3,6 +3,7 @@ import time
 import pytest
 import requests
 import psutil
+import re
 
 import sys
 import os
@@ -26,6 +27,8 @@ app = app.app
 #         yield mock_run
 
 
+# run from root dir:  pytest -s tests/test_integration.py
+# test may leave interfaces in a bad state, if so:  ./resetifs.sh
 
 def get_ip_address(interface_name):
     addrs = psutil.net_if_addrs()
@@ -74,13 +77,19 @@ def get_status(iface="enp0s25", url="http://127.0.0.1:5000/status"):
 
 
 def test_apply_and_reset_shaping_flow():
+    iface = "enp0s25"
+
+    # Reset and apply shaping to the enp0s25 interface
+    ok, _ = send_reset(iface)
+    assert ok, "Failed to reset shaping"
+
     # Apply shaping on eth0
-    ok, out = send_apply(iface="enp0s25", rate="10mbit", loss=1, duplicate=2, protocol="tcp")
+    ok, out = send_apply(iface=iface, rate="10mbit", loss=1, duplicate=2, protocol="tcp")
     assert ok == True
     assert "enp0s25" in out
 
     # Check status confirms shaping is applied
-    ok, status_out = get_status("enp0s25")
+    ok, status_out = get_status(iface)
     assert ok is True
     assert "htb" in status_out.lower()
     assert "10mbit" in status_out.lower()
@@ -88,12 +97,12 @@ def test_apply_and_reset_shaping_flow():
     assert "duplicate 2%" in status_out.lower()
 
     # Now reset shaping on enp0s25
-    ok, out = send_reset(iface="enp0s25")
+    ok, out = send_reset(iface=iface)
     assert ok == True
     assert "enp0s25" in out
 
     # Confirm reset took effect
-    ok, status_out = get_status("enp0s25")
+    ok, status_out = get_status(iface)
     assert ok is True
     assert any(q in status_out.lower() for q in ("noqueue", "pfifo_fast", "fq_codel", "default"))
 
@@ -139,19 +148,88 @@ def test_applied_delay_effect():
     assert ok
 
 
-@pytest.mark.skip(reason="debugging tests")
-def test_bandwidth_limit():
-    reset_shaping()
-    apply_shaping(delay_ms=0)
+def extract_bitrate_and_units(iperf_output: str):
+    """
+    Extract the bitrate and units from iperf3 output focusing on the receiver's summary line.
+    Returns: (bitrate_str, units, bitrate_mbit_float)
 
-    # Start iperf3 server in background
+    Note:
+        The receiver's bandwidth line is the better one to measure actual throughput received
+        on the shaped interface. The sender line often reports the raw max throughput, not
+        limited by shaping on the receiver side.
+    """
+    bitrate_str = None
+    units = None
+
+    # Find the receiver summary line near the end with "receiver" and "bits/sec"
+    for line in reversed(iperf_output.splitlines()):
+        if "receiver" in line and "bits/sec" in line:
+            # Example line:
+            # [  5]   0.00-5.53   sec   608 KBytes   901 Kbits/sec                  receiver
+            parts = line.split()
+            # Usually bitrate is second last token, units last but one
+            # Strategy: look for the token that matches bits/sec or similar
+            for i, token in enumerate(parts):
+                if token.endswith("bits/sec"):
+                    # Get the number just before unit
+                    bitrate_str = parts[i - 1]
+                    units = token
+                    break
+            if bitrate_str and units:
+                break
+
+    if not bitrate_str or not units:
+        raise ValueError("No receiver bitrate line found in iperf3 output")
+
+    # Convert to Mbit/sec
+    rate = float(bitrate_str)
+    units_lower = units.lower()
+    if "kbits" in units_lower:
+        rate /= 1000
+    elif "gbits" in units_lower:
+        rate *= 1000
+    # else assume Mbits
+
+    return bitrate_str, units, rate
+
+
+# @pytest.mark.skip(reason="debugging tests")
+def test_bandwidth_limit():
+    iface = "lo"
+
+    # Reset and apply shaping to the loopback interface
+    ok, _ = send_reset(iface)
+    assert ok, "Failed to reset shaping"
+
+    ok, _ = send_apply(iface=iface, rate="1mbit", loss=0, duplicate=0, protocol="all", delay=0)
+    assert ok, "Failed to apply shaping"
+
+    # Start iperf3 server on localhost
     server = subprocess.Popen(["iperf3", "-s"])
     time.sleep(1)
+    print("started iperf3 server")
 
-    # Run iperf3 client
+    print("started iperf3 client to test BW")
     result = subprocess.run(["iperf3", "-c", "127.0.0.1", "-t", "5"], capture_output=True, text=True)
-    server.terminate()
+    print("IPERF3 STDOUT:", result.stdout)
+    print("IPERF3 STDERR:", result.stderr)
 
-    assert "bits/sec" in result.stdout
-    assert "1.00 Gbits/sec" not in result.stdout  # Should be capped
+    server.terminate()
+    print("terminated iperf3 server")
+
+    server.wait()
+    print("waited for child process (iperf3 server) to terminate")
+
+    # Extract reported bitrate
+    try:
+        bitrate_str, units, rate_mbit = extract_bitrate_and_units(result.stdout)
+        print(f"Bitrate: {rate_mbit:.2f} Mbit/sec ({bitrate_str} {units})")
+    except Exception:
+        raise AssertionError("No bitrate line found in iperf3 output")
+
+    assert rate_mbit < 1.2, f"Expected rate limit around 1 Mbit, got {rate_mbit:.2f} Mbit/sec"
+
+    # Cleanup
+    ok, _ = send_reset(iface)
+    assert ok, "Failed to reset shaping after test"
 
